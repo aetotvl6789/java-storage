@@ -48,6 +48,7 @@ import com.google.common.hash.HashCode;
 import com.google.common.hash.Hashing;
 import com.google.common.io.ByteStreams;
 import com.google.protobuf.ByteString;
+import com.google.protobuf.FieldMask;
 import com.google.storage.v2.BucketName;
 import com.google.storage.v2.CommonObjectRequestParams;
 import com.google.storage.v2.CreateBucketRequest;
@@ -68,6 +69,7 @@ import com.google.storage.v2.StorageClient.ListHmacKeysPage;
 import com.google.storage.v2.StorageClient.ListHmacKeysPagedResponse;
 import com.google.storage.v2.StorageClient.ListObjectsPage;
 import com.google.storage.v2.StorageClient.ListObjectsPagedResponse;
+import com.google.storage.v2.UpdateBucketRequest;
 import com.google.storage.v2.WriteObjectRequest;
 import com.google.storage.v2.WriteObjectResponse;
 import com.google.storage.v2.WriteObjectSpec;
@@ -133,13 +135,8 @@ final class GrpcStorageImpl extends BaseService<StorageOptions> implements Stora
   public Bucket create(BucketInfo bucketInfo, BucketTargetOption... options) {
     final Map<StorageRpc.Option, ?> optionsMap = StorageImpl.optionMap(options);
     GrpcCallContext grpcCallContext = GrpcRequestMetadataSupport.create(optionsMap);
-    com.google.storage.v2.Bucket bucket =
-        com.google.storage.v2.Bucket.newBuilder()
-            .setName(BucketName.format(this.getOptions().getProjectId(), bucketInfo.getName()))
-            .setProject(this.getOptions().getProjectId())
-            .build();
     CreateBucketRequest.Builder bucketRequestBuilder =
-        CreateBucketRequest.newBuilder().setBucket(bucket);
+        CreateBucketRequest.newBuilder().setBucket(codecs.bucketInfo().encode(bucketInfo));
     ifNonNull(
         (String) optionsMap.get(StorageRpc.Option.PREDEFINED_ACL),
         bucketRequestBuilder::setPredefinedAcl);
@@ -417,7 +414,35 @@ final class GrpcStorageImpl extends BaseService<StorageOptions> implements Stora
 
   @Override
   public Bucket update(BucketInfo bucketInfo, BucketTargetOption... options) {
-    return todo();
+    final Map<StorageRpc.Option, ?> optionsMap = StorageImpl.optionMap(options);
+    GrpcCallContext grpcCallContext = GrpcRequestMetadataSupport.create(optionsMap);
+    com.google.storage.v2.Bucket bucket = codecs.bucketInfo().encode(bucketInfo);
+    UpdateBucketRequest.Builder bucketRequestBuilder =
+        UpdateBucketRequest.newBuilder().setBucket(bucket);
+    bucketRequestBuilder.setUpdateMask(
+        FieldMask.newBuilder()
+            .addAllPaths(
+                bucket.getAllFields().entrySet().stream()
+                    .filter(x -> x.getValue() != null)
+                    .map(e -> e.getKey().getName())
+                    .collect(Collectors.toList()))
+            .build());
+    ifNonNull(
+        (String) optionsMap.get(StorageRpc.Option.PREDEFINED_ACL),
+        bucketRequestBuilder::setPredefinedAcl);
+    ifNonNull(
+        (Long) optionsMap.get(StorageRpc.Option.IF_METAGENERATION_NOT_MATCH),
+        bucketRequestBuilder::setIfMetagenerationNotMatch);
+    ifNonNull(
+        (Long) optionsMap.get(StorageRpc.Option.IF_METAGENERATION_MATCH),
+        bucketRequestBuilder::setIfMetagenerationNotMatch);
+    UpdateBucketRequest req = bucketRequestBuilder.build();
+
+    return Retrying.run(
+        getOptions(),
+        retryAlgorithmManager.getFor(req),
+        () -> grpcStorageStub.updateBucketCallable().call(req, grpcCallContext),
+        syntaxDecoders.bucket);
   }
 
   @Override
